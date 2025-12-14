@@ -7,6 +7,19 @@ import time
 from bs4 import BeautifulSoup
 
 # --- Helper Functions ---
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+}
+
+def normalize_domain(domain):
+    """
+    Normalizes a domain by removing 'www.' and converting to lowercase.
+    """
+    if not domain:
+        return ""
+    return domain.lower().replace('www.', '')
+
 def get_sitemap_url(base_url):
     """
     Attempts to find the sitemap URL by checking robots.txt or common paths.
@@ -17,7 +30,7 @@ def get_sitemap_url(base_url):
     # Check robots.txt
     robots_url = urljoin(domain, '/robots.txt')
     try:
-        response = requests.get(robots_url, timeout=5)
+        response = requests.get(robots_url, headers=HEADERS, timeout=10)
         if response.status_code == 200:
             for line in response.text.splitlines():
                 if line.lower().startswith('sitemap:'):
@@ -31,7 +44,7 @@ def get_sitemap_url(base_url):
         try:
             sitemap_candidate = urljoin(domain, path)
             # Use HEAD request to check availability without downloading full content
-            response = requests.head(sitemap_candidate, timeout=5)
+            response = requests.head(sitemap_candidate, headers=HEADERS, timeout=10)
             if response.status_code == 200:
                 return sitemap_candidate
         except requests.RequestException:
@@ -45,7 +58,7 @@ def extract_links_from_sitemap(sitemap_url):
     """
     links = []
     try:
-        response = requests.get(sitemap_url, timeout=10)
+        response = requests.get(sitemap_url, headers=HEADERS, timeout=15)
         if response.status_code != 200:
             return []
 
@@ -68,14 +81,16 @@ def extract_links_from_sitemap(sitemap_url):
         
     return links
 
-def count_internal_links(page_url, target_domain):
+def count_internal_links(page_url, target_domains):
     """
-    Fetches a page and counts unique internal links to the target domain,
+    Fetches a page and counts unique internal links to any of the target domains,
     heuristically excluding navigation, footer, and sidebars.
+    target_domains: A set of normalized domain strings.
     """
     try:
-        response = requests.get(page_url, timeout=5)
+        response = requests.get(page_url, headers=HEADERS, timeout=10)
         if response.status_code != 200:
+            # Maybe add logging here?
             return 0
             
         soup = BeautifulSoup(response.content, 'html.parser')
@@ -116,8 +131,17 @@ def count_internal_links(page_url, target_domain):
             full_url = urljoin(page_url, href)
             parsed_href = urlparse(full_url)
             
-            # Check if link belongs to the same domain
-            if parsed_href.netloc == target_domain:
+            # Normalize the link's domain
+            link_domain = normalize_domain(parsed_href.netloc)
+            
+            # Check if link belongs to any of the target domains
+            # If netloc is empty (relative link), it's internal to the page_url's domain
+            if not parsed_href.netloc:
+                # Relative link, assume internal if counting base domain
+                # But we need valid full URL
+                pass # already handled by urljoin, netloc should be present in full_url check
+            
+            if link_domain in target_domains:
                  # Exclude anchor links to the same page
                  if full_url.split('#')[0] != page_url.split('#')[0]:
                     internal_links.add(full_url)
@@ -136,8 +160,6 @@ def extract_category(url):
         return "root"
     
     segments = path.split('/')
-    # If the first segment is essentially a file extension or mostly empty, handle gently
-    # But usually just taking the first segment is what's desired.
     return segments[0] if segments else "root"
 
 
@@ -153,7 +175,11 @@ if "sitemap_links" not in st.session_state:
 if "analyzed_data" not in st.session_state:
     st.session_state.analyzed_data = None
 
-url_input = st.text_input("Website URL", placeholder="https://example.com")
+col_input1, col_input2 = st.columns(2)
+with col_input1:
+    url_input = st.text_input("Website URL", placeholder="https://example.com")
+with col_input2:
+    related_domains_input = st.text_input("Additional Related Domains (comma-separated)", placeholder="example.university, other-site.com")
 
 if st.button("1. Find Sitemap & Extract Links", type="primary"):
     if not url_input:
@@ -195,7 +221,7 @@ if st.session_state.sitemap_links:
     st.markdown(f"Ready to analyze **{len(st.session_state.sitemap_links)}** pages. This will count internal links on each page.")
     
     # Speed control
-    max_workers = st.slider("Concurrency (Workers)", min_value=1, max_value=20, value=10, help="Higher values are faster but might get blocked by some servers.")
+    max_workers = st.slider("Concurrency (Workers)", min_value=1, max_value=20, value=4, help="Higher values are faster but might get blocked by some servers.")
     
     if st.button("2. Analyze Internal Links"):
         progress_bar = st.progress(0)
@@ -203,14 +229,23 @@ if st.session_state.sitemap_links:
         
         results = []
         total_links = len(st.session_state.sitemap_links)
-        domain = urlparse(url_input if url_input.startswith('http') else 'https://' + url_input).netloc
+        
+        # Prepare Target Domains
+        main_domain = normalize_domain(urlparse(url_input if url_input.startswith('http') else 'https://' + url_input).netloc)
+        target_domains = {main_domain}
+        
+        if related_domains_input:
+            others = [normalize_domain(d.strip()) for d in related_domains_input.split(',')]
+            target_domains.update(others)
+            
+        st.info(f"Counting links to: {', '.join(target_domains)}")
 
         start_time = time.time()
         
         # Parallel Execution
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all tasks
-            future_to_url = {executor.submit(count_internal_links, url, domain): url for url in st.session_state.sitemap_links}
+            # Submit all tasks. Pass the set of target_domains
+            future_to_url = {executor.submit(count_internal_links, url, target_domains): url for url in st.session_state.sitemap_links}
             
             completed_count = 0
             for future in concurrent.futures.as_completed(future_to_url):
