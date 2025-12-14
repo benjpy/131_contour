@@ -126,6 +126,20 @@ def count_internal_links(page_url, target_domain):
     except Exception:
         return 0
 
+def extract_category(url):
+    """
+    Extracts the first directory from the URL path to use as a category.
+    Example: example.com/blog/post-1 -> 'blog'
+    """
+    path = urlparse(url).path.strip('/')
+    if not path:
+        return "root"
+    
+    segments = path.split('/')
+    # If the first segment is essentially a file extension or mostly empty, handle gently
+    # But usually just taking the first segment is what's desired.
+    return segments[0] if segments else "root"
+
 
 # --- Streamlit UI ---
 st.set_page_config(page_title="Sitemap SEO Analyzer", page_icon="🕷️", layout="wide")
@@ -224,21 +238,54 @@ if st.session_state.sitemap_links:
 if st.session_state.analyzed_data is not None:
     df = st.session_state.analyzed_data
     
+    # Calculate Categories
+    df['Category'] = df['URL'].apply(extract_category)
+    
     st.divider()
     st.subheader("Results")
     
+    # 1. Overall Metrics
     col1, col2 = st.columns(2)
     with col1:
         st.metric("Total Pages", len(df))
     with col2:
         st.metric("Avg. Internal Links", f"{df['Internal Links'].mean():.1f}")
     
+    # 2. Category Analysis
+    st.subheader("📂 Category Analysis")
+    st.markdown("Average internal links per sub-folder.")
+    
+    category_stats = df.groupby('Category').agg({
+        'URL': 'count',
+        'Internal Links': 'mean'
+    }).reset_index()
+    
+    category_stats.columns = ['Category', 'Page Count', 'Avg. Internal Links']
+    category_stats['Avg. Internal Links'] = category_stats['Avg. Internal Links'].round(1)
+    
+    # Sort by page count by default
+    category_stats = category_stats.sort_values('Page Count', ascending=False)
+    
+    st.dataframe(
+        category_stats,
+        use_container_width=True,
+        column_config={
+            "Category": st.column_config.TextColumn("Sub-Folder", help="The root folder of the URL path"),
+            "Page Count": st.column_config.NumberColumn("Pages"),
+            "Avg. Internal Links": st.column_config.ProgressColumn("Avg. Cross-Links", format="%.1f", min_value=0, max_value=max(category_stats['Avg. Internal Links'].max(), 10))
+        },
+        hide_index=True
+    )
+    
+    st.divider()
+    st.subheader("📄 Page Details")
     st.dataframe(
         df, 
         use_container_width=True,
         column_config={
             "URL": st.column_config.LinkColumn("Page URL"),
-            "Internal Links": st.column_config.NumberColumn("Internal Links", format="%d 🔗")
+            "Internal Links": st.column_config.NumberColumn("Internal Links", format="%d 🔗"),
+            "Category": st.column_config.TextColumn("Category")
         }
     )
     
