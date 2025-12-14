@@ -86,12 +86,15 @@ def count_internal_links(page_url, target_domains):
     Fetches a page and counts unique internal links to any of the target domains,
     heuristically excluding navigation, footer, and sidebars.
     target_domains: A set of normalized domain strings.
+    Returns: A dictionary with 'Total' and individual domain counts.
     """
+    results = {d: 0 for d in target_domains}
+    results['Total'] = 0
+    
     try:
         response = requests.get(page_url, headers=HEADERS, timeout=10)
         if response.status_code != 200:
-            # Maybe add logging here?
-            return 0
+            return results
             
         soup = BeautifulSoup(response.content, 'html.parser')
         
@@ -114,7 +117,7 @@ def count_internal_links(page_url, target_domains):
             content_area = soup.find('body')
             
         if not content_area:
-             return 0
+             return results
 
         # Create a copy or work directly? Modifying soup modifies the tree.
         # We can just decompose the unwanted tags within the content_area
@@ -124,7 +127,9 @@ def count_internal_links(page_url, target_domains):
             
         links = content_area.find_all('a', href=True)
         
-        internal_links = set()
+        # Track unique links per domain to avoid double counting same link
+        found_links = set() 
+        
         for link in links:
             href = link['href']
             # handle relative URLs
@@ -137,18 +142,22 @@ def count_internal_links(page_url, target_domains):
             # Check if link belongs to any of the target domains
             # If netloc is empty (relative link), it's internal to the page_url's domain
             if not parsed_href.netloc:
-                # Relative link, assume internal if counting base domain
-                # But we need valid full URL
-                pass # already handled by urljoin, netloc should be present in full_url check
+                # Need to figure out which base domain this relative link belongs to.
+                # Since we are crawling page_url, it belongs to page_url's domain.
+                page_domain = normalize_domain(urlparse(page_url).netloc)
+                link_domain = page_domain
             
             if link_domain in target_domains:
                  # Exclude anchor links to the same page
                  if full_url.split('#')[0] != page_url.split('#')[0]:
-                    internal_links.add(full_url)
+                     if full_url not in found_links:
+                        found_links.add(full_url)
+                        results[link_domain] += 1
+                        results['Total'] += 1
                 
-        return len(internal_links)
+        return results
     except Exception:
-        return 0
+        return results
 
 def extract_category(url):
     """
@@ -250,11 +259,15 @@ if st.session_state.sitemap_links:
             completed_count = 0
             for future in concurrent.futures.as_completed(future_to_url):
                 url = future_to_url[future]
+                row = {"URL": url}
                 try:
-                    internal_count = future.result()
-                    results.append({"URL": url, "Internal Links": internal_count})
+                    # internal_count dict: {'Total': X, 'domain1': Y, ...}
+                    counts = future.result()
+                    row.update(counts)
                 except Exception as e:
-                    results.append({"URL": url, "Internal Links": 0}) # Fail safe
+                    row['Total'] = 0 # Fail safe
+                
+                results.append(row)
                 
                 # Update progress
                 completed_count += 1
@@ -263,7 +276,7 @@ if st.session_state.sitemap_links:
                 status_text.text(f"Analyzing {completed_count}/{total_links}...")
 
         elapsed_time = time.time() - start_time
-        st.session_state.analyzed_data = pd.DataFrame(results)
+        st.session_state.analyzed_data = pd.DataFrame(results).fillna(0) # Fill NaN with 0 for missing domains in some rows
         
         status_text.empty()
         progress_bar.empty()
@@ -284,7 +297,7 @@ if st.session_state.analyzed_data is not None:
     with col1:
         st.metric("Total Pages", len(df))
     with col2:
-        st.metric("Avg. Internal Links", f"{df['Internal Links'].mean():.1f}")
+        st.metric("Avg. Internal Links", f"{df['Total'].mean():.1f}")
     
     # 2. Category Analysis
     st.subheader("📂 Category Analysis")
@@ -292,7 +305,7 @@ if st.session_state.analyzed_data is not None:
     
     category_stats = df.groupby('Category').agg({
         'URL': 'count',
-        'Internal Links': 'mean'
+        'Total': 'mean'
     }).reset_index()
     
     category_stats.columns = ['Category', 'Page Count', 'Avg. Internal Links']
@@ -314,14 +327,29 @@ if st.session_state.analyzed_data is not None:
     
     st.divider()
     st.subheader("📄 Page Details")
+    
+    # Dynamic Column Config
+    # Base config
+    column_config = {
+        "URL": st.column_config.LinkColumn("Page URL"),
+        "Category": st.column_config.TextColumn("Category"),
+        "Total": st.column_config.NumberColumn("Total Links", format="%d 🔗")
+    }
+    
+    # Add config for each domain column found in df (excluding fixed cols)
+    fixed_cols = ['URL', 'Category', 'Total']
+    domain_cols = [c for c in df.columns if c not in fixed_cols]
+    
+    for col in domain_cols:
+         column_config[col] = st.column_config.NumberColumn(f"{col}", format="%d")
+         
+    # Reorder columns: URL, Total, [Domains], Category
+    final_cols = ['URL', 'Total'] + domain_cols + ['Category']
+    
     st.dataframe(
-        df, 
+        df[final_cols], 
         use_container_width=True,
-        column_config={
-            "URL": st.column_config.LinkColumn("Page URL"),
-            "Internal Links": st.column_config.NumberColumn("Internal Links", format="%d 🔗"),
-            "Category": st.column_config.TextColumn("Category")
-        }
+        column_config=column_config
     )
     
     csv = df.to_csv(index=False).encode('utf-8')
