@@ -25,8 +25,19 @@ def get_sitemap_url(base_url):
     except requests.RequestException:
         pass
     
-    # Fallback to standard sitemap.xml
-    return urljoin(domain, '/sitemap.xml')
+    # Fallback to standard sitemap locations
+    common_paths = ['/sitemap.xml', '/sitemap_index.xml', '/wp-sitemap.xml']
+    for path in common_paths:
+        try:
+            sitemap_candidate = urljoin(domain, path)
+            # Use HEAD request to check availability without downloading full content
+            response = requests.head(sitemap_candidate, timeout=5)
+            if response.status_code == 200:
+                return sitemap_candidate
+        except requests.RequestException:
+            continue
+            
+    return None
 
 def extract_links_from_sitemap(sitemap_url):
     """
@@ -59,7 +70,8 @@ def extract_links_from_sitemap(sitemap_url):
 
 def count_internal_links(page_url, target_domain):
     """
-    Fetches a page and counts unique internal links to the target domain.
+    Fetches a page and counts unique internal links to the target domain,
+    heuristically excluding navigation, footer, and sidebars.
     """
     try:
         response = requests.get(page_url, timeout=5)
@@ -67,21 +79,53 @@ def count_internal_links(page_url, target_domain):
             return 0
             
         soup = BeautifulSoup(response.content, 'html.parser')
-        links = soup.find_all('a', href=True)
+        
+        # Heuristic: Find main content to avoid counting nav/footer links
+        content_area = None
+        
+        # Priority 1: <article> tag
+        article = soup.find('article')
+        if article:
+            content_area = article
+        
+        # Priority 2: <main> tag
+        if not content_area:
+            main = soup.find('main')
+            if main:
+                content_area = main
+                
+        # Priority 3: Fallback to body
+        if not content_area:
+            content_area = soup.find('body')
+            
+        if not content_area:
+             return 0
+
+        # Create a copy or work directly? Modifying soup modifies the tree.
+        # We can just decompose the unwanted tags within the content_area
+        exclude_tags = ['nav', 'header', 'footer', 'aside', 'form', 'script', 'style']
+        for tag in content_area.find_all(exclude_tags):
+            tag.decompose()
+            
+        links = content_area.find_all('a', href=True)
         
         internal_links = set()
         for link in links:
             href = link['href']
+            # handle relative URLs
             full_url = urljoin(page_url, href)
             parsed_href = urlparse(full_url)
             
             # Check if link belongs to the same domain
             if parsed_href.netloc == target_domain:
-                internal_links.add(full_url)
+                 # Exclude anchor links to the same page
+                 if full_url.split('#')[0] != page_url.split('#')[0]:
+                    internal_links.add(full_url)
                 
         return len(internal_links)
     except Exception:
         return 0
+
 
 # --- Streamlit UI ---
 st.set_page_config(page_title="Sitemap SEO Analyzer", page_icon="🕷️", layout="wide")
