@@ -126,11 +126,18 @@ if st.button("1. Find Sitemap & Extract Links", type="primary"):
                 status.update(label="Failed", state="error")
                 st.error("❌ Could not find a sitemap.")
 
+import concurrent.futures
+
+# ... imports ...
+
 # Step 2: Analysis
 if st.session_state.sitemap_links:
     st.divider()
     st.subheader("Step 2: Cross-Linking Analysis")
     st.markdown(f"Ready to analyze **{len(st.session_state.sitemap_links)}** pages. This will count internal links on each page.")
+    
+    # Speed control
+    max_workers = st.slider("Concurrency (Workers)", min_value=1, max_value=20, value=10, help="Higher values are faster but might get blocked by some servers.")
     
     if st.button("2. Analyze Internal Links"):
         progress_bar = st.progress(0)
@@ -140,23 +147,34 @@ if st.session_state.sitemap_links:
         total_links = len(st.session_state.sitemap_links)
         domain = urlparse(url_input if url_input.startswith('http') else 'https://' + url_input).netloc
 
+        start_time = time.time()
         
-        for i, link in enumerate(st.session_state.sitemap_links):
-            # Update progress
-            progress = (i + 1) / total_links
-            progress_bar.progress(progress)
-            status_text.text(f"Analyzing {i+1}/{total_links}: {link}")
+        # Parallel Execution
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks
+            future_to_url = {executor.submit(count_internal_links, url, domain): url for url in st.session_state.sitemap_links}
             
-            internal_count = count_internal_links(link, domain)
-            results.append({"URL": link, "Internal Links": internal_count})
-            
-            # Small delay to be polite to the server
-            time.sleep(0.1)
-            
+            completed_count = 0
+            for future in concurrent.futures.as_completed(future_to_url):
+                url = future_to_url[future]
+                try:
+                    internal_count = future.result()
+                    results.append({"URL": url, "Internal Links": internal_count})
+                except Exception as e:
+                    results.append({"URL": url, "Internal Links": 0}) # Fail safe
+                
+                # Update progress
+                completed_count += 1
+                progress = completed_count / total_links
+                progress_bar.progress(progress)
+                status_text.text(f"Analyzing {completed_count}/{total_links}...")
+
+        elapsed_time = time.time() - start_time
         st.session_state.analyzed_data = pd.DataFrame(results)
+        
         status_text.empty()
         progress_bar.empty()
-        st.success("✅ Analysis Complete!")
+        st.success(f"✅ Analysis Complete in {elapsed_time:.2f} seconds!")
 
 # Display Results
 if st.session_state.analyzed_data is not None:
